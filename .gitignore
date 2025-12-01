@@ -1,0 +1,64 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+agents/venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+*.log
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+
+# TypeScript/JavaScript
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Terminals
+terminals/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+
+# Temporary Markdown files
+/__*.md
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+*.tar.gz
+*.zip
+

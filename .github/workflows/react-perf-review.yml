@@ -1,0 +1,84 @@
+name: React Performance Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**.tsx'
+      - '**.ts'
+      - '**.jsx'
+      - '**.js'
+
+jobs:
+  analyze:
+    name: Analyze React Performance
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: parser/package-lock.json
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: agents/requirements.txt
+      
+      - name: Install parser dependencies
+        run: |
+          cd parser
+          npm ci
+          npm run build
+      
+      - name: Install agent dependencies
+        run: |
+          cd agents
+          pip install -r requirements.txt
+      
+      - name: Run performance analysis
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Configuration
+          SEVERITY_THRESHOLD: ${{ vars.PERF_SEVERITY_THRESHOLD || 'medium' }}
+          AUTO_APPROVE: ${{ vars.PERF_AUTO_APPROVE || 'false' }}
+        run: |
+          cd agents
+          
+          # Determine flags
+          FLAGS=""
+          if [ "$AUTO_APPROVE" = "true" ]; then
+            FLAGS="$FLAGS --auto-approve"
+          fi
+          
+          # Run analysis
+          python3 github_integration.py $PR_NUMBER \
+            --severity $SEVERITY_THRESHOLD \
+            $FLAGS
+      
+      - name: Upload analysis results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-analysis
+          path: |
+            agents/*.json
+            agents/*.log
+          retention-days: 7
+

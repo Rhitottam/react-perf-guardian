@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  code-review-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: react-perf-analyzer:latest
+    container_name: react-perf-analyzer
+    
+    # Environment variables (override with .env file)
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_REPOSITORY=${GITHUB_REPOSITORY}
+      - DEBUG_ANALYSIS=${DEBUG_ANALYSIS:-0}
+    
+    # Mount volumes for local development
+    volumes:
+      # Mount .env file
+      - ./.env:/app/.env:ro
+      # Mount code for hot-reload during development (optional)
+      - ./agents:/app/agents:ro
+      - ./parser/dist:/app/parser/dist:ro
+      # Mount examples
+      - ./examples:/app/examples:ro
+    
+    # Network mode
+    network_mode: bridge
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    
+    # Command (override at runtime)
+    # Examples:
+    # docker-compose run code-review-agent python3 agents/main.py examples/UserList.tsx
+    # docker-compose run code-review-agent ./review-pr.sh <PR_URL> --analyze-only
+    command: python3 agents/main.py --help
+
+# Optional: Add a service for running as a daemon
+  pr-reviewer:
+    extends: code-review-agent
+    container_name: pr-reviewer
+    # This service can be used to continuously monitor PRs
+    command: tail -f /dev/null
+    profiles:
+      - daemon
+
