@@ -18,6 +18,10 @@ agents/venv/
 .coverage
 *.log
 
+# Database (session storage)
+agents/pr_analyses.db
+agents/*.db
+
 # Node
 node_modules/
 npm-debug.log*
@@ -49,6 +53,10 @@ terminals/
 *.tmp
 *.temp
 .cache/
+
+# Session database (Memory Agent)
+agents/pr_sessions.db
+agents/pr_sessions.db-*
 
 
 # Temporary Markdown files

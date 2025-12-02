@@ -114,19 +114,31 @@ class GitHubPRAnalyzer:
         
         return react_files
     
-    def fetch_file_content(self, filepath: str, ref: str = "HEAD") -> str:
+    def fetch_file_content(self, filepath: str, ref: str = "HEAD", contents_url: str = None) -> str:
         """
         Fetch file content from GitHub
         
         Args:
             filepath: Path to file in repo
             ref: Git ref (branch, commit, etc.)
+            contents_url: GitHub API contents URL (preferred for PR files)
             
         Returns:
             File content as string
         """
         import requests
         
+        # Prefer contents_url if provided (reliable API endpoint for PR files)
+        if contents_url:
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/vnd.github.v3.raw"  # Get raw content directly
+            }
+            response = requests.get(contents_url, headers=headers)
+            response.raise_for_status()
+            return response.text
+        
+        # Fallback to constructing contents URL manually
         url = f"https://api.github.com/repos/{self.repo}/contents/{filepath}?ref={ref}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -138,13 +150,15 @@ class GitHubPRAnalyzer:
         
         return response.text
     
-    async def analyze_pr_file(self, filename: str, content: str) -> Dict:
+    async def analyze_pr_file(self, filename: str, content: str, session_id: str, is_first_file: bool = True) -> Dict:
         """
         Analyze a single file using the React Performance Analyzer
         
         Args:
             filename: Name of the file
             content: File content
+            session_id: Session ID for this PR analysis (shared across all files)
+            is_first_file: If True, skip Memory Agent (no history yet)
             
         Returns:
             Analysis results with issues
@@ -154,8 +168,16 @@ class GitHubPRAnalyzer:
         print(f"  🔍 Analyzing {filename}...")
         
         try:
-            # Run analysis
-            result = await analyze_code(content, output_format="json", filename=filename)
+            # Run analysis with FRESH session for analyzer
+            # Memory Agent reads from PR session, but analyzer gets clean context
+            result = await analyze_code(
+                content, 
+                output_format="json", 
+                filename=filename,
+                pr_session_id=session_id,  # ← PR session for Memory Agent
+                memory_context="",  # ← Memory Agent provides this
+                is_first_file=is_first_file  # ← Skip memory for first file
+            )
             
             # Debug: Show what we got
             if os.getenv('DEBUG_ANALYSIS'):
@@ -172,20 +194,40 @@ class GitHubPRAnalyzer:
                     "error": "Empty analysis result (file may be too large or complex)"
                 }
             
+            # Check if result is an error message from the agent
+            if isinstance(result, str):
+                error_indicators = ["I'm sorry", "error", "failed", "cannot parse", "unable to"]
+                if any(indicator.lower() in result.lower()[:100] for indicator in error_indicators):
+                    if not result.strip().startswith('{'):
+                        print(f"  ⚠️  Agent reported error: {result[:100]}...")
+                        return {
+                            "filename": filename,
+                            "success": True,
+                            "issues": [],
+                            "summary": {"warning": "Agent reported parsing error"},
+                            "error": result[:200]
+                        }
+            
             # Parse JSON result
             if isinstance(result, str):
                 try:
                     # Strip markdown code fences if present
                     cleaned_result = result.strip()
-                    if cleaned_result.startswith('```'):
-                        # Remove opening fence (```json or ```)
-                        lines = cleaned_result.split('\n')
-                        if lines[0].startswith('```'):
-                            lines = lines[1:]
-                        # Remove closing fence
-                        if lines and lines[-1].strip() == '```':
-                            lines = lines[:-1]
-                        cleaned_result = '\n'.join(lines)
+                    
+                    # Handle various markdown fence formats
+                    if '```' in cleaned_result:
+                        # Method 1: JSON on same line as fence (```json {...} ```)
+                        fence_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', cleaned_result)
+                        if fence_match:
+                            cleaned_result = fence_match.group(1)
+                        else:
+                            # Method 2: Multi-line fence (```json\n{...}\n```)
+                            lines = cleaned_result.split('\n')
+                            if lines[0].startswith('```'):
+                                lines = lines[1:]
+                            if lines and lines[-1].strip() == '```':
+                                lines = lines[:-1]
+                            cleaned_result = '\n'.join(lines)
                     
                     result = json.loads(cleaned_result)
                     print(f"  ✅ Parsed response successfully")
@@ -224,6 +266,9 @@ class GitHubPRAnalyzer:
             issues = result.get("issues", [])
             print(f"  📊 Found {len(issues)} potential issues")
             
+            # Memory Agent handles cross-file insights via session history
+            # Issues are stored in the session automatically
+            
             return {
                 "filename": filename,
                 "success": True,
@@ -242,16 +287,24 @@ class GitHubPRAnalyzer:
     
     async def analyze_pr(self, pr_number: int) -> Dict:
         """
-        Analyze all React files in a PR
+        Analyze all React files in a PR using DatabaseSessionService + Memory Agent.
+        
+        The Memory Agent reads session history to extract patterns for cross-file insights.
         
         Args:
             pr_number: Pull request number
             
         Returns:
-            Combined analysis results
+            Combined analysis results with project-wide insights
         """
         print(f"\n🚀 Analyzing PR #{pr_number} in {self.repo}")
         print("=" * 60)
+        
+        # Create ONE session ID for entire PR analysis
+        # All files share this session - Memory Agent reads history between files
+        session_id = f"pr-{self.repo.replace('/', '-')}-{pr_number}"
+        print(f"📝 Session ID: {session_id}")
+        print("🧠 Memory Agent will extract patterns from session history")
         
         # Get changed files
         changed_files = self.get_changed_files(pr_number)
@@ -264,34 +317,77 @@ class GitHubPRAnalyzer:
                 "results": []
             }
         
-        # Analyze each file
+        # Analyze each file with shared session
         results = []
-        for file_info in changed_files:
+        all_issues = []
+        
+        for i, file_info in enumerate(changed_files):
             filename = file_info['filename']
+            contents_url = file_info.get('contents_url')
+            is_first_file = (i == 0)  # Only first file skips Memory Agent
             
             # Fetch file content
             try:
-                content = self.fetch_file_content(filename, ref=f"pull/{pr_number}/head")
+                content = self.fetch_file_content(filename, ref=f"pull/{pr_number}/head", contents_url=contents_url)
             except Exception as e:
                 print(f"  ❌ Could not fetch {filename}: {str(e)}")
                 continue
             
-            # Analyze file
-            analysis = await self.analyze_pr_file(filename, content)
+            # Analyze file with shared session ID
+            # Memory Agent runs automatically for subsequent files
+            analysis = await self.analyze_pr_file(
+                filename, 
+                content, 
+                session_id=session_id, 
+                is_first_file=is_first_file
+            )
             results.append(analysis)
+            
+            # Collect issues for summary
+            if analysis.get("success") and analysis.get("issues"):
+                all_issues.extend(analysis["issues"])
         
         # Combine results
-        total_issues = sum(len(r.get("issues", [])) for r in results if r.get("success"))
+        total_issues = len(all_issues)
+        
+        # Count issue types for project insights
+        issue_types = {}
+        for issue in all_issues:
+            issue_type = issue.get("title", "unknown")
+            issue_types[issue_type] = issue_types.get(issue_type, 0) + 1
         
         print("=" * 60)
         print(f"✅ Analysis complete: {len(results)} files, {total_issues} issues found")
+        
+        # Show recurring issues
+        recurring = {k: v for k, v in issue_types.items() if v >= 2}
+        if recurring:
+            print(f"⚠️  Recurring issues: {', '.join(f'{k} ({v}x)' for k, v in recurring.items())}")
+        
+        # Clear the database file to prevent cross-PR pollution
+        self._cleanup_session_db()
         
         return {
             "pr_number": pr_number,
             "files_analyzed": len(results),
             "results": results,
-            "total_issues": total_issues
+            "total_issues": total_issues,
+            "recurring_issues": recurring,
+            "issue_breakdown": issue_types,
+            "session_id": session_id
         }
+    
+    def _cleanup_session_db(self):
+        """Clean up the session database after PR analysis."""
+        import os
+        from pathlib import Path
+        db_path = Path(__file__).parent / "pr_sessions.db"
+        try:
+            if db_path.exists():
+                os.remove(db_path)
+                print(f"🗑️  Cleared session database")
+        except Exception as e:
+            print(f"⚠️  Could not clear session DB: {e}")
     
     def post_review_comment(
         self, 
@@ -494,6 +590,26 @@ class GitHubPRAnalyzer:
                     "body": comment_body.strip()
                 })
         
+        # Build memory insights section
+        memory_section = ""
+        recurring_warning = analysis.get("recurring_warning")
+        conventions = analysis.get("detected_conventions", {})
+        
+        if recurring_warning or conventions:
+            memory_section = "\n\n---\n\n### 🧠 Project-Wide Insights\n\n"
+            
+            if recurring_warning:
+                memory_section += f"**⚠️ Recurring Pattern Detected:**\n{recurring_warning}\n\n"
+                memory_section += "Consider implementing a project-wide solution:\n"
+                memory_section += "- Add ESLint rules (e.g., `react-perf/jsx-no-new-function-as-prop`)\n"
+                memory_section += "- Create utility hooks (e.g., `useStableCallback`)\n"
+                memory_section += "- Team training on React.memo patterns\n\n"
+            
+            if conventions:
+                memory_section += "**Detected Conventions:**\n"
+                for key, value in conventions.items():
+                    memory_section += f"- {key.replace('_', ' ').title()}: `{value}`\n"
+        
         # Determine review event
         if critical_count > 0:
             event = "REQUEST_CHANGES"
@@ -510,6 +626,7 @@ This PR has {critical_count} critical performance issue(s) that should be addres
 - 💡 Total issues: {len(review_comments)}
 
 Please review the inline comments for details.
+{memory_section}
 """
         elif high_count > 0 and not auto_approve:
             event = "COMMENT"
@@ -523,6 +640,7 @@ Please review the inline comments for details.
 - 💡 Total issues: {len(review_comments)}
 
 Consider addressing these before merging.
+{memory_section}
 """
         elif len(review_comments) > 0:
             event = "APPROVE" if auto_approve else "COMMENT"
@@ -532,6 +650,7 @@ Consider addressing these before merging.
 **Minor issues found: {len(review_comments)}**
 
 These are suggestions that may improve performance. Not blocking.
+{memory_section}
 """
         else:
             event = "APPROVE" if auto_approve else "COMMENT"
@@ -539,6 +658,7 @@ These are suggestions that may improve performance. Not blocking.
 ## ✅ React Performance Review
 
 No performance issues detected! Great work! 🎉
+{memory_section}
 """
         
         # Post review

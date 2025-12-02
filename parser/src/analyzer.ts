@@ -31,13 +31,30 @@ export class ReactAstAnalyzer {
     const exports: ExportInfo[] = [];
 
     try {
-      // Parse with Babel
+      // Parse with Babel - include all modern JS/TS/React plugins
       const ast = parser.parse(code, {
         sourceType: 'module',
         plugins: [
           'jsx',
           'typescript',
-          ['decorators', { decoratorsBeforeExport: true }]
+          ['decorators', { decoratorsBeforeExport: true }],
+          'classProperties',
+          'classPrivateProperties',
+          'classPrivateMethods',
+          'exportDefaultFrom',
+          'exportNamespaceFrom',
+          'dynamicImport',
+          'nullishCoalescingOperator',
+          'optionalChaining',
+          'optionalCatchBinding',
+          'objectRestSpread',
+          'asyncGenerators',
+          'functionBind',
+          'throwExpressions',
+          'topLevelAwait',
+          'importMeta',
+          'bigInt',
+          'numericSeparator',
         ]
       });
 

@@ -65,7 +65,8 @@ analyzer_agent = Agent(
     name="analyzer",
     model=Gemini(
         model="gemini-2.5-flash-lite",
-        retry_options=retry_config
+        retry_options=retry_config,
+        generation_config={"response_mime_type": "application/json"}
     ),
     description="Analyzes React components for performance patterns and issues",
     tools=[
@@ -78,8 +79,21 @@ analyzer_agent = Agent(
         FunctionTool(analyze_jsx_expressions),
     ],
     instruction="""
-You are a React performance analysis expert. You receive parsed AST data 
-and must identify performance issues using the available tools.
+You are a React performance analysis expert with MEMORY of previous analyses.
+You receive parsed AST data and must identify performance issues using the available tools.
+
+## 🧠 MEMORY AWARENESS
+
+You may receive PROJECT MEMORY context containing:
+- **Recurring patterns**: Issues found in other files in this PR
+- **Project conventions**: State management style (Redux, Context), memoization patterns
+- **Analysis history**: How many files analyzed, what issues seen
+
+**Use memory to:**
+1. **Prioritize recurring issues**: If you see the same pattern others found, flag it as higher priority
+2. **Provide context-aware suggestions**: Match suggestions to project conventions
+3. **Recognize systematic problems**: 3+ similar issues = project-wide pattern
+4. **Add context to findings**: "This is the 4th file with inline functions"
 
 ## Analysis Strategy
 
@@ -105,11 +119,12 @@ and must identify performance issues using the available tools.
 
 3. **For prop drilling concerns**: Use trace_prop to follow flow
 
+4. **Check memory context**: If memory shows this pattern recurring, mention it!
+
 ## Output Format
 
-Return structured JSON:
+CRITICAL: Return structured JSON
 
-```json
 {
   "issues": [
     {
@@ -120,35 +135,99 @@ Return structured JSON:
       "description": "Clear explanation",
       "evidence": {},
       "severity": "critical|warning|suggestion",
-      "confidence": "high|medium|low"
+      "confidence": "high|medium|low",
+      "memory_note": "Optional: e.g., 'Recurring pattern (3rd occurrence)'"
     }
   ],
   "component_health": {
     "ComponentName": "good|needs-attention|problematic"
   }
 }
-```
 
 ## Guidelines
 
 - **Avoid false positives**: Only flag issues with evidence
 - **Context matters**: Inline function is fine if child isn't memoized
 - **Be specific**: Include line numbers and concrete details
+- **Use memory**: If memory shows a pattern, mention it in your findings
 """,
 )
 
 
-# Agent 3: Reasoner Agent  
+# Memory Agent - Extracts SHORT snapshot from session history
+memory_agent = Agent(
+    name="memory",
+    model=Gemini(
+        model="gemini-2.5-flash-lite",
+        retry_options=retry_config
+    ),
+    description="Extracts SHORT snapshot from session history for cross-file context",
+    instruction="""
+You are a Memory Agent. Read the conversation history and provide a VERY SHORT summary.
+
+## YOUR JOB
+Look at previous file analyses in this session and summarize in 2-3 lines:
+- How many files analyzed so far?
+- What recurring issues found? (e.g., "inline functions: 5 occurrences")
+- Any patterns? (e.g., "Project uses Redux")
+
+## CRITICAL: BE EXTREMELY BRIEF!
+
+Your output should be MAX 50 words. Just the key facts.
+
+## Output Format
+
+Return ONLY plain text like this:
+
+"Analyzed 3 files. Found: inline functions (5x), missing useCallback (3x). Uses Redux for state."
+
+OR if first file (no history):
+
+"First file in PR - no prior context."
+
+DO NOT return JSON. DO NOT explain. Just the SHORT summary.
+""",
+)
+
+
+# Agent 4: Reasoner Agent  
 reasoner_agent = Agent(
     name="reasoner",
     model=Gemini(
         model="gemini-2.5-flash-lite",
-        retry_options=retry_config
+        retry_options=retry_config,
+        generation_config={"response_mime_type": "application/json"}
     ),  # Use thinking model for reasoning
     description="Evaluates issues, filters false positives, and suggests fixes",
     instruction="""
 You receive a list of potential performance issues from the analyzer.
 Your job is to apply expert judgment to filter and enhance the findings.
+
+## 🧠 MEMORY AWARENESS
+
+The Memory Agent (previous step) has analyzed the session history and extracted patterns.
+You will receive their output showing:
+- **Recurring patterns**: Same issue found in multiple files
+- **Project conventions**: How the team structures their code (Redux, Context, etc.)
+- **Pattern warnings**: Issues that appear 3+ times need systemic solutions
+
+**When memory shows recurring patterns:**
+1. **Upgrade severity**: A recurring critical issue should mention it's a pattern
+2. **Add context**: "This is the 3rd occurrence of inline functions in this PR"
+3. **Suggest systemic fixes**: "Consider ESLint rule for project-wide consistency"
+4. **Recognize conventions**: Tailor suggestions to project's state management style
+
+**Example Memory Output:**
+```json
+{
+  "patterns": {
+    "recurring_issues": {"inline_function": 3},
+    "conventions": {"state_management": "redux"}
+  }
+}
+```
+
+Use this to enhance your issue validation and suggestions!
 
 ## For each issue:
 
@@ -157,26 +236,30 @@ Your job is to apply expert judgment to filter and enhance the findings.
    - Inline objects are fine if child doesn't use React.memo
    - Consider if the "fix" adds more complexity than the problem warrants
 
-2. **Assess severity**:
+2. **Assess severity** (with memory awareness):
    - **Critical**: Will cause noticeable perf issues (N+1 re-renders, broken memoization)
-   - **Warning**: Could cause issues at scale, worth addressing
-   - **Suggestion**: Cleaner code, marginal performance benefit
+     - UPGRADE to critical if memory shows this is a recurring pattern (3+ times)
+   - **High**: Could cause issues at scale, worth addressing
+   - **Medium**: Minor performance impact
+   - **Low**: Cleaner code, marginal performance benefit
 
 3. **Provide actionable fix**:
    - Include specific code changes
    - Explain the "why" - what runtime behavior does this cause?
    - Note any tradeoffs
+   - **If recurring**: Add project-wide solution suggestions
 
 4. **Assign confidence**:
    - **High**: Clear evidence from AST analysis
    - **Medium**: Likely issue but depends on runtime behavior
    - **Low**: Potential issue, worth reviewing
 
+Filter aggressively. Developers hate false positives.
 ## Output Format
 
 CRITICAL: Each issue MUST include file, line, component, severity, title, problem, and suggestion.
+If memory shows this is recurring, add that context to the problem/suggestion.
 
-```json
 {
   "issues": [
     {
@@ -203,9 +286,7 @@ CRITICAL: Each issue MUST include file, line, component, severity, title, proble
     "overall_health": "good|needs-work|problematic"
   }
 }
-```
-
-Filter aggressively. Developers hate false positives.
+.
 """,
 )
 
@@ -413,9 +494,72 @@ Keep it actionable and scannable.
 )
 
 
-# Main orchestrator - Sequential multi-agent system
-performance_analyzer = SequentialAgent(
+# Main orchestrator - Single comprehensive agent (more reliable)
+# Uses all available tools for parsing and analysis
+performance_analyzer = Agent(
     name="react_performance_analyzer",
-    description="Analyzes React code for performance issues using multi-agent pipeline",
+    model=Gemini(
+        model="gemini-2.5-flash-lite",
+        retry_options=retry_config
+    ),
+    description="Analyzes React code for performance issues",
+    tools=[
+        FunctionTool(parse_code),
+        FunctionTool(inspect_component),
+        FunctionTool(list_components),
+        FunctionTool(analyze_render_triggers),
+        FunctionTool(analyze_hook_dependencies),
+        FunctionTool(analyze_state_relationships),
+        FunctionTool(analyze_jsx_expressions),
+    ],
+    instruction="""
+You are a React Performance Analysis expert.
+
+## MANDATORY WORKFLOW - FOLLOW EXACTLY
+
+You MUST complete ALL these steps in order:
+
+### Step 1: Parse the code
+Call: parse_code(code, filename)
+
+### Step 2: Analyze JSX (REQUIRED - ALWAYS CALL THIS)
+For EACH component found, call: analyze_jsx_expressions(component_name)
+
+### Step 3: Check hooks (if component has hooks)  
+Call: analyze_hook_dependencies(component_name)
+
+### Step 4: Output JSON (REQUIRED)
+After ALL tool calls complete, output your final JSON analysis.
+
+## IMPORTANT: You MUST call analyze_jsx_expressions!
+
+Even if the code looks simple, ALWAYS call analyze_jsx_expressions for each component.
+The tools will find issues you might miss by visual inspection.
+
+## ISSUES TO DETECT
+
+- Inline arrow functions: `onClick={() => ...}` 
+- Inline objects: `style={{ ... }}`
+- useEffect that should be useMemo
+- Missing/incorrect dependency arrays
+
+## FINAL OUTPUT FORMAT
+
+After calling tools, respond with ONLY this JSON:
+
+{"issues": [{"file": "file.tsx", "line": 42, "component": "Name", "severity": "critical|high|medium|low", "title": "Brief title", "problem": "Description", "suggestion": "How to fix"}], "summary": {"total_issues": N}}
+
+If no issues: {"issues": [], "summary": {"total_issues": 0}}
+
+DO NOT explain. DO NOT use markdown. ONLY output JSON.
+""",
+)
+
+# Keep individual agents available for specialized use
+# Memory Agent is available for cross-file pattern detection
+# Sequential agent available if needed for complex multi-step analysis
+sequential_analyzer = SequentialAgent(
+    name="sequential_react_analyzer",
+    description="Multi-stage analysis pipeline (fallback)",
     sub_agents=[parser_agent, analyzer_agent, reasoner_agent, reporter_agent],
 )
