@@ -65,7 +65,8 @@ analyzer_agent = Agent(
     name="analyzer",
     model=Gemini(
         model="gemini-2.5-flash-lite",
-        retry_options=retry_config
+        retry_options=retry_config,
+        generation_config={"response_mime_type": "application/json"}
     ),
     description="Analyzes React components for performance patterns and issues",
     tools=[
@@ -122,9 +123,8 @@ You may receive PROJECT MEMORY context containing:
 
 ## Output Format
 
-Return structured JSON:
+CRITICAL: Return structured JSON
 
-```json
 {
   "issues": [
     {
@@ -143,7 +143,6 @@ Return structured JSON:
     "ComponentName": "good|needs-attention|problematic"
   }
 }
-```
 
 ## Guidelines
 
@@ -155,70 +154,38 @@ Return structured JSON:
 )
 
 
-# Agent 3: Memory Agent (NEW!)
+# Memory Agent - Extracts SHORT snapshot from session history
 memory_agent = Agent(
     name="memory",
     model=Gemini(
         model="gemini-2.5-flash-lite",
         retry_options=retry_config
     ),
-    description="Extracts patterns from session history and provides clean context",
+    description="Extracts SHORT snapshot from session history for cross-file context",
     instruction="""
-You are a Memory Extraction Agent. Your job is to read the conversation history 
-and extract useful patterns WITHOUT getting confused by tool calls or implementation details.
+You are a Memory Agent. Read the conversation history and provide a VERY SHORT summary.
 
-## What to Extract
+## YOUR JOB
+Look at previous file analyses in this session and summarize in 2-3 lines:
+- How many files analyzed so far?
+- What recurring issues found? (e.g., "inline functions: 5 occurrences")
+- Any patterns? (e.g., "Project uses Redux")
 
-1. **Recurring Issues**: Count issue types that appear multiple times
-   - Example: "inline_function: 3 occurrences"
-   
-2. **Project Conventions**: Detect patterns in code structure
-   - State management: Redux, Context, local state?
-   - Memoization: Heavy (70%+), moderate, light?
-   - Hook patterns: Custom hooks, inline hooks?
+## CRITICAL: BE EXTREMELY BRIEF!
 
-3. **Cross-File Patterns**: Issues that span multiple files
-   - Same component pattern repeated
-   - Shared anti-patterns
-
-## CRITICAL: Focus on OUTCOMES, not tool calls!
-
-**IGNORE lines like:**
-- "[parser] called tool `parse_code`..."
-- "For context: [agent]..."
-- Technical implementation details
-
-**FOCUS on:**
-- "Found issue: inline function at line 42"
-- "Component uses Redux hooks"
-- "3 files have the same pattern"
+Your output should be MAX 50 words. Just the key facts.
 
 ## Output Format
 
-Return ONLY clean JSON:
+Return ONLY plain text like this:
 
-```json
-{
-  "patterns": {
-    "recurring_issues": {
-      "inline_function": 3,
-      "unstable_dependency": 2
-    },
-    "conventions": {
-      "state_management": "redux",
-      "memoization": "heavy"
-    },
-    "files_analyzed": 5,
-    "components_seen": ["Component1", "Component2"]
-  },
-  "warnings": [
-    "inline_function appears 3+ times - consider ESLint rule"
-  ],
-  "summary": "Brief summary of what you learned"
-}
-```
+"Analyzed 3 files. Found: inline functions (5x), missing useCallback (3x). Uses Redux for state."
 
-Be concise. Focus on actionable patterns.
+OR if first file (no history):
+
+"First file in PR - no prior context."
+
+DO NOT return JSON. DO NOT explain. Just the SHORT summary.
 """,
 )
 
@@ -228,7 +195,8 @@ reasoner_agent = Agent(
     name="reasoner",
     model=Gemini(
         model="gemini-2.5-flash-lite",
-        retry_options=retry_config
+        retry_options=retry_config,
+        generation_config={"response_mime_type": "application/json"}
     ),  # Use thinking model for reasoning
     description="Evaluates issues, filters false positives, and suggests fixes",
     instruction="""
@@ -286,12 +254,12 @@ Use this to enhance your issue validation and suggestions!
    - **Medium**: Likely issue but depends on runtime behavior
    - **Low**: Potential issue, worth reviewing
 
+Filter aggressively. Developers hate false positives.
 ## Output Format
 
 CRITICAL: Each issue MUST include file, line, component, severity, title, problem, and suggestion.
 If memory shows this is recurring, add that context to the problem/suggestion.
 
-```json
 {
   "issues": [
     {
@@ -318,9 +286,7 @@ If memory shows this is recurring, add that context to the problem/suggestion.
     "overall_health": "good|needs-work|problematic"
   }
 }
-```
-
-Filter aggressively. Developers hate false positives.
+.
 """,
 )
 

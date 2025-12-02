@@ -47,29 +47,51 @@ AI-powered multi-agent system for automated React performance analysis in Pull R
 
 ## 🏗️ Architecture
 
+**5-Agent Multi-Agent System** orchestrated via Google ADK's `SequentialAgent`:
+
 ```
-                                  🧠 PROJECT MEMORY
-                                 (Tracks Patterns)
-                                        │
-                    ┌───────────────────┼───────────────────┐
-                    │                   │                   │
-                    ▼                   ▼                   ▼
-┌─────────────┐     ┌──────────────┐     ┌────────────────┐     ┌────────────────┐
-│   Parser    │────▶│   Analyzer   │────▶│    Reasoner    │────▶│    Reporter    │
-│   Agent     │     │    Agent     │     │     Agent      │     │     Agent      │
-└─────────────┘     └──────────────┘     └────────────────┘     └────────────────┘
-     │                     │                      │                      │
-  Babel AST           Pattern              Validation             Formatted
-   Parsing            Detection            & Filtering              Output
-                     + Memory Read        + Memory Write        + Insights
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           PR Analysis Flow                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  File N → [Memory Agent] → "Pattern summary: 10 inline functions..."        │
+│            ↓                                                                 │
+│           [Sequential Agent Pipeline]                                        │
+│            ├→ Parser Agent    (Babel AST parsing)                           │
+│            ├→ Analyzer Agent  (Issue detection - 8 tools)                   │
+│            ├→ Reasoner Agent  (Prioritization + context)                    │
+│            └→ Reporter Agent  (GitHub/JSON output)                          │
+│            ↓                                                                 │
+│           Store Summary → DatabaseSessionService                             │
+│                                                                              │
+│  PR Done → Clear Database                                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         5-AGENT MULTI-AGENT SYSTEM                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  🧠 Memory Agent         →  Cross-file pattern detection                    │
+│                              Provides ~50 word summary to pipeline           │
+│                                                                              │
+│  📝 Parser Agent         →  parse_code() - Babel AST extraction             │
+│  🔍 Analyzer Agent       →  8 specialized tools for issue detection         │
+│  💡 Reasoner Agent       →  Prioritizes issues, adds suggestions            │
+│  📊 Reporter Agent       →  Formats output for GitHub PR reviews            │
+│                                                                              │
+│  [SequentialAgent orchestration: Parser → Analyzer → Reasoner → Reporter]   │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Configuration:** Set `USE_MULTI_AGENT=false` for single-agent mode (faster, less specialized)
 
 **Tech Stack:**
 - 🧠 Google Gemini 2.5 Flash Lite
-- 🔧 Google ADK (Agent Development Kit)
-- 💾 InMemorySessionService + ProjectMemory
+- 🔧 Google ADK (Agent Development Kit) with SequentialAgent
+- 💾 DatabaseSessionService (Persistent SQLite)
+- 🤖 5 Specialized Agents (Memory, Parser, Analyzer, Reasoner, Reporter)
 - 📝 Babel Parser (AST analysis)
-- 🐍 Python 3.12+ 
+- 🐍 Python 3.12+
 - 📦 Node.js 20+
 - 🐳 Docker & Docker Compose
 

@@ -54,6 +54,10 @@ terminals/
 *.temp
 .cache/
 
+# Session database (Memory Agent)
+agents/pr_sessions.db
+agents/pr_sessions.db-*
+
 
 # Temporary Markdown files
 /__*.md

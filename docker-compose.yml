@@ -20,7 +20,7 @@ services:
       # Mount .env file
       - ./.env:/app/.env:ro
       # Mount code for hot-reload during development (optional)
-      - ./agents:/app/agents:ro
+      - ./agents:/app/agents
       - ./parser/dist:/app/parser/dist:ro
       # Mount examples
       - ./examples:/app/examples:ro

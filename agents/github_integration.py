@@ -150,7 +150,7 @@ class GitHubPRAnalyzer:
         
         return response.text
     
-    async def analyze_pr_file(self, filename: str, content: str, session_id: str, memory=None) -> Dict:
+    async def analyze_pr_file(self, filename: str, content: str, session_id: str, is_first_file: bool = True) -> Dict:
         """
         Analyze a single file using the React Performance Analyzer
         
@@ -158,7 +158,7 @@ class GitHubPRAnalyzer:
             filename: Name of the file
             content: File content
             session_id: Session ID for this PR analysis (shared across all files)
-            memory: Optional ProjectMemory instance for context-aware analysis
+            is_first_file: If True, skip Memory Agent (no history yet)
             
         Returns:
             Analysis results with issues
@@ -167,34 +167,16 @@ class GitHubPRAnalyzer:
         
         print(f"  🔍 Analyzing {filename}...")
         
-        # Build memory context for the agent
-        memory_context = ""
-        if memory:
-            # Add detected conventions
-            if memory.conventions:
-                conv_list = [f"{k}: {v}" for k, v in memory.conventions.items()]
-                memory_context += f"\n### Project Conventions Detected:\n" + "\n".join(f"- {c}" for c in conv_list)
-            
-            # Add recurring issue warnings
-            if memory.recurring_issues:
-                top_issues = sorted(memory.recurring_issues.items(), key=lambda x: x[1], reverse=True)[:3]
-                if top_issues:
-                    memory_context += f"\n\n### Recurring Patterns in This PR:\n"
-                    for issue_type, count in top_issues:
-                        memory_context += f"- {issue_type}: {count} occurrence(s) so far\n"
-            
-            # Add file count for context
-            if memory.analyzed_files:
-                memory_context += f"\n### Files Analyzed So Far: {len(memory.analyzed_files)}\n"
-        
         try:
-            # Run analysis with memory context and session ID
+            # Run analysis with FRESH session for analyzer
+            # Memory Agent reads from PR session, but analyzer gets clean context
             result = await analyze_code(
                 content, 
                 output_format="json", 
                 filename=filename,
-                session_id=session_id,  # ← Pass session ID
-                memory_context=memory_context
+                pr_session_id=session_id,  # ← PR session for Memory Agent
+                memory_context="",  # ← Memory Agent provides this
+                is_first_file=is_first_file  # ← Skip memory for first file
             )
             
             # Debug: Show what we got
@@ -284,29 +266,8 @@ class GitHubPRAnalyzer:
             issues = result.get("issues", [])
             print(f"  📊 Found {len(issues)} potential issues")
             
-            # Store analysis in memory for cross-file insights
-            if memory:
-                memory.record_analysis(filename, issues)
-                
-                # Extract components from summary for convention detection
-                summary = result.get("summary", {})
-                components_analyzed = summary.get("components_analyzed", [])
-                if components_analyzed:
-                    # Build component info from issues (simplified)
-                    component_info = []
-                    for comp_name in components_analyzed:
-                        # Check if any issues mention this component
-                        comp_issues = [i for i in issues if i.get("component") == comp_name]
-                        has_memo = any("memo" in i.get("title", "").lower() for i in comp_issues)
-                        component_info.append({
-                            "name": comp_name,
-                            "isMemoized": not has_memo  # Simplified heuristic
-                        })
-                    
-                    # Detect conventions
-                    memory.detect_conventions(component_info)
-                
-                print(f"  💾 Stored in memory: {len(issues)} issues recorded")
+            # Memory Agent handles cross-file insights via session history
+            # Issues are stored in the session automatically
             
             return {
                 "filename": filename,
@@ -326,7 +287,9 @@ class GitHubPRAnalyzer:
     
     async def analyze_pr(self, pr_number: int) -> Dict:
         """
-        Analyze all React files in a PR with memory-aware context
+        Analyze all React files in a PR using DatabaseSessionService + Memory Agent.
+        
+        The Memory Agent reads session history to extract patterns for cross-file insights.
         
         Args:
             pr_number: Pull request number
@@ -334,19 +297,14 @@ class GitHubPRAnalyzer:
         Returns:
             Combined analysis results with project-wide insights
         """
-        from memory import ProjectMemory
-        
         print(f"\n🚀 Analyzing PR #{pr_number} in {self.repo}")
         print("=" * 60)
         
         # Create ONE session ID for entire PR analysis
-        # This allows agents to see conversation history across all files
+        # All files share this session - Memory Agent reads history between files
         session_id = f"pr-{self.repo.replace('/', '-')}-{pr_number}"
         print(f"📝 Session ID: {session_id}")
-        
-        # Initialize memory for this PR analysis
-        memory = ProjectMemory()
-        print("🧠 Memory initialized - enabling cross-file pattern detection")
+        print("🧠 Memory Agent will extract patterns from session history")
         
         # Get changed files
         changed_files = self.get_changed_files(pr_number)
@@ -359,48 +317,77 @@ class GitHubPRAnalyzer:
                 "results": []
             }
         
-        # Analyze each file
+        # Analyze each file with shared session
         results = []
-        for file_info in changed_files:
+        all_issues = []
+        
+        for i, file_info in enumerate(changed_files):
             filename = file_info['filename']
-            contents_url = file_info.get('contents_url')  # GitHub API URL for contents
+            contents_url = file_info.get('contents_url')
+            is_first_file = (i == 0)  # Only first file skips Memory Agent
             
-            # Fetch file content (prefer contents_url for reliability)
+            # Fetch file content
             try:
                 content = self.fetch_file_content(filename, ref=f"pull/{pr_number}/head", contents_url=contents_url)
             except Exception as e:
                 print(f"  ❌ Could not fetch {filename}: {str(e)}")
                 continue
             
-            # Analyze file with memory context and shared session ID
-            analysis = await self.analyze_pr_file(filename, content, session_id=session_id, memory=memory)
+            # Analyze file with shared session ID
+            # Memory Agent runs automatically for subsequent files
+            analysis = await self.analyze_pr_file(
+                filename, 
+                content, 
+                session_id=session_id, 
+                is_first_file=is_first_file
+            )
             results.append(analysis)
+            
+            # Collect issues for summary
+            if analysis.get("success") and analysis.get("issues"):
+                all_issues.extend(analysis["issues"])
         
         # Combine results
-        total_issues = sum(len(r.get("issues", [])) for r in results if r.get("success"))
+        total_issues = len(all_issues)
         
-        # Get project-wide insights from memory
-        project_insights = memory.get_analysis_summary()
-        recurring_warning = memory.get_recurring_issue_warning()
+        # Count issue types for project insights
+        issue_types = {}
+        for issue in all_issues:
+            issue_type = issue.get("title", "unknown")
+            issue_types[issue_type] = issue_types.get(issue_type, 0) + 1
         
         print("=" * 60)
         print(f"✅ Analysis complete: {len(results)} files, {total_issues} issues found")
         
-        if recurring_warning:
-            print(f"⚠️  {recurring_warning}")
+        # Show recurring issues
+        recurring = {k: v for k, v in issue_types.items() if v >= 2}
+        if recurring:
+            print(f"⚠️  Recurring issues: {', '.join(f'{k} ({v}x)' for k, v in recurring.items())}")
         
-        if memory.conventions:
-            print(f"📘 Detected conventions: {', '.join(f'{k}={v}' for k, v in memory.conventions.items())}")
+        # Clear the database file to prevent cross-PR pollution
+        self._cleanup_session_db()
         
         return {
             "pr_number": pr_number,
             "files_analyzed": len(results),
             "results": results,
             "total_issues": total_issues,
-            "project_insights": project_insights,
-            "recurring_warning": recurring_warning,
-            "detected_conventions": memory.conventions
+            "recurring_issues": recurring,
+            "issue_breakdown": issue_types,
+            "session_id": session_id
         }
+    
+    def _cleanup_session_db(self):
+        """Clean up the session database after PR analysis."""
+        import os
+        from pathlib import Path
+        db_path = Path(__file__).parent / "pr_sessions.db"
+        try:
+            if db_path.exists():
+                os.remove(db_path)
+                print(f"🗑️  Cleared session database")
+        except Exception as e:
+            print(f"⚠️  Could not clear session DB: {e}")
     
     def post_review_comment(
         self, 
