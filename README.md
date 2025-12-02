@@ -427,13 +427,6 @@ Built with:
 
 ---
 
-## 📞 Support
-
-- 📖 **Documentation**: Check docs/ directory
-- 🐛 **Issues**: Open a GitHub issue
-- 💬 **Discussions**: GitHub Discussions
-
----
 
 ## ⭐ Star History
 
