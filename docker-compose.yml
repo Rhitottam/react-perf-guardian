@@ -14,6 +14,7 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN}
       - GITHUB_REPOSITORY=${GITHUB_REPOSITORY}
       - DEBUG_ANALYSIS=${DEBUG_ANALYSIS:-0}
+      - USE_MULTI_AGENT=${USE_MULTI_AGENT:-true}
     
     # Mount volumes for local development
     volumes:

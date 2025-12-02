@@ -377,39 +377,11 @@ code-review-agent/
 └── README.md
 ```
 
-### Adding New Detection Patterns
-
-See [DEVELOPMENT.md](./DEVELOPMENT.md) for details on:
-- Creating new analysis tools
-- Extending agent capabilities
-- Adding custom rules
-- Testing strategies
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Areas needing help:
-
-- 🐛 Bug fixes
-- 🎯 New performance pattern detection
-- 📚 Documentation improvements
-- 🧪 Test coverage
-- 🎨 Output formatting
-
-**Process:**
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
 ---
 
 ## 📚 Documentation
 
 - [SETUP.md](./SETUP.md) - Detailed installation guide
-- [DEVELOPMENT.md](./DEVELOPMENT.md) - Development guidelines
 - [PROJECT_SUMMARY.md](./PROJECT_SUMMARY.md) - Architecture overview
 
 ---
@@ -442,11 +414,6 @@ docker-compose build --no-cache
 - Check DEBUG_ANALYSIS=1 for details
 - Try analyzing smaller files first
 
----
-
-## 📄 License
-
-MIT License - see [LICENSE](./LICENSE) file for details.
 
 ---
 
