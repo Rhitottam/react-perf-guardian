@@ -18,6 +18,10 @@ agents/venv/
 .coverage
 *.log
 
+# Database (session storage)
+agents/pr_analyses.db
+agents/*.db
+
 # Node
 node_modules/
 npm-debug.log*

@@ -2,11 +2,11 @@ import asyncio
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-from agents import performance_analyzer
+from agents import performance_analyzer, memory_agent
 from google.genai import types
 from google.adk.agents import Agent
-from google.adk.sessions import InMemorySessionService, BaseSessionService
-from google.adk.runners import InMemoryRunner, Runner, Event
+from google.adk.sessions import InMemorySessionService
+from google.adk.runners import Runner, Event
 from google.genai.types import Content, Part
 import uuid
 
@@ -14,8 +14,8 @@ import uuid
 load_dotenv()
 
 APP_NAME = "react-perf-analyzer"
-USER_ID = "user-" + str(uuid.uuid4())
-SESSION_ID = "session-" + str(uuid.uuid4())
+USER_ID = "react-perf-user"  # Fixed user ID for all analyses
+
 # Validate API key is present
 if not os.getenv('GOOGLE_API_KEY'):
     print("❌ Error: GOOGLE_API_KEY not found!")
@@ -24,79 +24,186 @@ if not os.getenv('GOOGLE_API_KEY'):
     print("🔑 Get your key from: https://makersuite.google.com/app/apikey")
     exit(1)
 
-# session_service = InMemorySessionService()
+# Use InMemorySessionService - each file gets fresh context
+# Cross-file memory is handled by ProjectMemory class
+session_service = InMemorySessionService()
 
-def get_runner_with_session (agent: Agent):
-    runner = InMemoryRunner(agent=agent, app_name=APP_NAME)
-    session_service = runner.session_service
-    return (runner, session_service)
+print(f"🗄️  Using in-memory sessions (fresh context per file)")
+print(f"🧠 Cross-file patterns tracked via ProjectMemory")
 
-async def create_session (session_service: BaseSessionService):
-    session = await session_service.get_session(
-        app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID
+async def ensure_session(session_id: str) -> None:
+    """Create a fresh session for this file analysis."""
+    await session_service.create_session(
+        app_name=APP_NAME, 
+        user_id=USER_ID, 
+        session_id=session_id
     )
-    if session is None:
-        session = await session_service.create_session(
-            app_name=APP_NAME, user_id=USER_ID, session_id=SESSION_ID
-        )
-    return session
+    print(f"📝 New analysis session: {session_id[:30]}...")
+
 def final_response_from_events(events: list[Event]):
+    """Extract final response from event stream."""
+    import json
+    
     final_response = ""
     final_found = False
+    tool_results = []  # Collect tool results as fallback
     
-    for event in events:
-        if event.is_final_response() and event.content and event.content.parts:
-            final_response = event.content.parts[0].text
-            final_found = True
-            break
+    # Debug: Show event types
+    DEBUG = os.environ.get("DEBUG_EVENTS", "").lower() == "true"
+    if DEBUG:
+        print(f"\n🔍 DEBUG: Processing {len(events)} events:")
     
-    if not final_found:
-        print(f"⚠️  Warning: No final response found in {len(events)} events")
-        # Try to collect any text from events
-        for event in events:
-            if event.content and event.content.parts:
-                for part in event.content.parts:
-                    if hasattr(part, 'text') and part.text:
-                        final_response += part.text + "\n"
+    for i, event in enumerate(events):
+        if DEBUG:
+            print(f"  Event {i}: is_final={event.is_final_response()}, author={getattr(event, 'author', 'unknown')}")
+        
+        if event.content and event.content.parts:
+            for part in event.content.parts:
+                # Collect text responses
+                if hasattr(part, 'text') and part.text:
+                    if event.is_final_response():
+                        final_response = part.text
+                        final_found = True
+                        if DEBUG:
+                            print(f"    Found final text: {part.text[:80]}...")
+                
+                # Collect function responses (for fallback)
+                if hasattr(part, 'function_response'):
+                    resp = part.function_response
+                    if hasattr(resp, 'response') and resp.response:
+                        tool_results.append({
+                            'name': getattr(resp, 'name', 'unknown'),
+                            'data': resp.response
+                        })
+                        if DEBUG:
+                            print(f"    Tool response: {getattr(resp, 'name', 'unknown')}")
+    
+    # If no final text response, synthesize from tool results
+    if not final_found or not final_response.strip():
+        if tool_results:
+            print(f"📊 Synthesizing response from {len(tool_results)} tool results")
+            
+            # Collect all issues from all analysis tools
+            all_issues = []
+            parse_info = None
+            
+            for result in tool_results:
+                name = result['name']
+                data = result['data']
+                
+                # Collect parse info for context
+                if name == 'parse_code':
+                    parse_info = data
+                
+                # Collect issues from any analysis tool
+                if name in ['analyze_jsx_expressions', 'analyze_render_triggers', 
+                           'analyze_hook_dependencies', 'analyze_state_relationships',
+                           'inspect_component']:
+                    if isinstance(data, dict) and 'issues' in data:
+                        all_issues.extend(data.get('issues', []))
+            
+            if all_issues:
+                response = {
+                    "issues": all_issues,
+                    "summary": {
+                        "total_issues": len(all_issues),
+                        "components_analyzed": parse_info.get('components_found', []) if parse_info else []
+                    }
+                }
+                final_response = json.dumps(response, indent=2)
+                print(f"✅ Synthesized JSON with {len(all_issues)} issues")
+            else:
+                # No issues found - return clean empty result
+                components = parse_info.get('components_found', []) if parse_info else []
+                response = {
+                    "issues": [],
+                    "summary": {
+                        "total_issues": 0,
+                        "components_analyzed": components,
+                        "status": "No performance issues detected"
+                    }
+                }
+                final_response = json.dumps(response, indent=2)
+                print(f"✅ No issues found in {len(components)} components")
+        else:
+            print(f"⚠️  Warning: No response or tool results found")
+            final_response = json.dumps({
+                "issues": [], 
+                "summary": {"total_issues": 0, "status": "Analysis incomplete - no tool results"}
+            })
     else:
-        # Log response type for debugging
-        if final_response:
-            preview = final_response[:100].replace('\n', ' ')
-            print(f"✅ Got response ({len(final_response)} chars): {preview}...")
+        preview = final_response[:100].replace('\n', ' ')
+        print(f"✅ Got response ({len(final_response)} chars): {preview}...")
     
     return final_response
 
-async def run_agent_async (message: str, runner: Runner):
+async def run_agent_async(message: str, session_id: str):
+    """
+    Run the agent pipeline with a specific session ID.
+    
+    Args:
+        message: The prompt/message for the agent
+        session_id: Session ID (should be PR-level, e.g., 'pr-owner-repo-123')
+    
+    Returns:
+        Final response text from the agent
+    """
+    # Ensure session exists
+    await ensure_session(session_id)
+    
     # Reduced logging - don't print the full prompt with code
-    print(f"🔄 Running analysis pipeline...")
+    print(f"🔄 Running analysis pipeline (session: {session_id[:20]}...)...")
+    
+    # Create runner with our agent pipeline
+    runner = Runner(
+        app_name=APP_NAME,
+        agent=performance_analyzer,
+        session_service=session_service,
+    )
+    
     events = []
     user_content = Content(
         role="user", parts=[Part(text=message)]
     )
+    
     async for event in runner.run_async(
-        user_id = USER_ID,
-        session_id = SESSION_ID,
+        user_id=USER_ID,
+        session_id=session_id,
         new_message=user_content,
     ):
         events.append(event)
+    
     return final_response_from_events(events)
 
-async def analyze_file(file_path: str, output_format: str = "markdown") -> str:
+async def analyze_file(file_path: str, output_format: str = "markdown", session_id: str = None) -> str:
     """
     Analyze a React file for performance issues using multi-agent system.
     
     Args:
         file_path: Path to the React/TypeScript file
         output_format: Output format (markdown, json, github)
+        session_id: Optional session ID. If not provided, generates one based on filename.
     
     Returns:
         Formatted analysis report from the agent pipeline
     """
     code = Path(file_path).read_text()
-    return await analyze_code(code, output_format, file_path)
+    
+    # Generate session ID if not provided (for CLI usage)
+    if session_id is None:
+        # For standalone file analysis, use filename-based session
+        session_id = f"file-{Path(file_path).stem}-{uuid.uuid4().hex[:8]}"
+    
+    return await analyze_code(code, output_format, file_path, session_id=session_id)
 
 
-async def analyze_code(code: str, output_format: str = "markdown", filename: str = "component.tsx") -> str:
+async def analyze_code(
+    code: str, 
+    output_format: str = "markdown", 
+    filename: str = "component.tsx", 
+    session_id: str = None,
+    memory_context: str = ""
+) -> str:
     """
     Analyze React code string for performance issues using multi-agent system.
     
@@ -104,24 +211,33 @@ async def analyze_code(code: str, output_format: str = "markdown", filename: str
         code: React/TypeScript source code
         output_format: Output format (markdown, json, github)
         filename: Virtual filename for context
+        session_id: Base session ID (will be made unique per file for clean context)
+        memory_context: Additional context from previous analyses (for cross-file insights)
     
     Returns:
         Formatted analysis report from the agent pipeline
     """
-    # runner = Runner(
-    #     app_name=APP_NAME,
-    #     agent=performance_analyzer,
-    #     session_service=session_service,
-    # )
+    # ALWAYS generate unique session ID per file to ensure fresh context
+    # Cross-file memory is passed via memory_context parameter, not session history
+    file_stem = Path(filename).stem
+    unique_session_id = f"file-{file_stem}-{uuid.uuid4().hex[:8]}"
     
-    # session = await session_service.create_session(
-    #     app_name=APP_NAME,
-    #     user_id="user",
-    #     session_id=SESSION_ID,
-    # )
-    
-    runner, session_service = get_runner_with_session(performance_analyzer)
-    session = await create_session(session_service)
+    # Build memory context section if available
+    memory_prompt = ""
+    if memory_context:
+        memory_prompt = f"""
+
+## 🧠 PROJECT MEMORY (Cross-File Context)
+
+You have access to information from previous files analyzed in this PR:
+{memory_context}
+
+Use this context to:
+- Prioritize recurring issues higher (if you see the same pattern again)
+- Provide convention-aware suggestions (e.g., "This project uses Redux, so...")
+- Recognize project-wide patterns that need systemic fixes
+- Give context about how many times you've seen similar issues
+"""
     
     prompt = f"""
 Analyze this React code for performance issues and output as {output_format} format.
@@ -131,6 +247,7 @@ File: {filename}
 ```tsx
 {code}
 ```
+{memory_prompt}
 
 IMPORTANT: The final output MUST be valid {output_format.upper()} only - no explanations or additional text.
 
@@ -156,12 +273,8 @@ Focus on:
 The final response must be ONLY the formatted {output_format} - no explanations.
 """
     
-    # result = await runner.run(
-    #     prompt,
-    #     session_id=session.id,
-    # )
-    
-    result = await run_agent_async(prompt, runner)
+    # Run agent with unique session ID (fresh context per file)
+    result = await run_agent_async(prompt, unique_session_id)
     
     return result
 

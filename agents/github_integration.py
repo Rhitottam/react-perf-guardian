@@ -114,19 +114,31 @@ class GitHubPRAnalyzer:
         
         return react_files
     
-    def fetch_file_content(self, filepath: str, ref: str = "HEAD") -> str:
+    def fetch_file_content(self, filepath: str, ref: str = "HEAD", contents_url: str = None) -> str:
         """
         Fetch file content from GitHub
         
         Args:
             filepath: Path to file in repo
             ref: Git ref (branch, commit, etc.)
+            contents_url: GitHub API contents URL (preferred for PR files)
             
         Returns:
             File content as string
         """
         import requests
         
+        # Prefer contents_url if provided (reliable API endpoint for PR files)
+        if contents_url:
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "Accept": "application/vnd.github.v3.raw"  # Get raw content directly
+            }
+            response = requests.get(contents_url, headers=headers)
+            response.raise_for_status()
+            return response.text
+        
+        # Fallback to constructing contents URL manually
         url = f"https://api.github.com/repos/{self.repo}/contents/{filepath}?ref={ref}"
         headers = {
             "Authorization": f"Bearer {self.token}",
@@ -138,13 +150,15 @@ class GitHubPRAnalyzer:
         
         return response.text
     
-    async def analyze_pr_file(self, filename: str, content: str) -> Dict:
+    async def analyze_pr_file(self, filename: str, content: str, session_id: str, memory=None) -> Dict:
         """
         Analyze a single file using the React Performance Analyzer
         
         Args:
             filename: Name of the file
             content: File content
+            session_id: Session ID for this PR analysis (shared across all files)
+            memory: Optional ProjectMemory instance for context-aware analysis
             
         Returns:
             Analysis results with issues
@@ -153,9 +167,35 @@ class GitHubPRAnalyzer:
         
         print(f"  🔍 Analyzing {filename}...")
         
+        # Build memory context for the agent
+        memory_context = ""
+        if memory:
+            # Add detected conventions
+            if memory.conventions:
+                conv_list = [f"{k}: {v}" for k, v in memory.conventions.items()]
+                memory_context += f"\n### Project Conventions Detected:\n" + "\n".join(f"- {c}" for c in conv_list)
+            
+            # Add recurring issue warnings
+            if memory.recurring_issues:
+                top_issues = sorted(memory.recurring_issues.items(), key=lambda x: x[1], reverse=True)[:3]
+                if top_issues:
+                    memory_context += f"\n\n### Recurring Patterns in This PR:\n"
+                    for issue_type, count in top_issues:
+                        memory_context += f"- {issue_type}: {count} occurrence(s) so far\n"
+            
+            # Add file count for context
+            if memory.analyzed_files:
+                memory_context += f"\n### Files Analyzed So Far: {len(memory.analyzed_files)}\n"
+        
         try:
-            # Run analysis
-            result = await analyze_code(content, output_format="json", filename=filename)
+            # Run analysis with memory context and session ID
+            result = await analyze_code(
+                content, 
+                output_format="json", 
+                filename=filename,
+                session_id=session_id,  # ← Pass session ID
+                memory_context=memory_context
+            )
             
             # Debug: Show what we got
             if os.getenv('DEBUG_ANALYSIS'):
@@ -172,20 +212,40 @@ class GitHubPRAnalyzer:
                     "error": "Empty analysis result (file may be too large or complex)"
                 }
             
+            # Check if result is an error message from the agent
+            if isinstance(result, str):
+                error_indicators = ["I'm sorry", "error", "failed", "cannot parse", "unable to"]
+                if any(indicator.lower() in result.lower()[:100] for indicator in error_indicators):
+                    if not result.strip().startswith('{'):
+                        print(f"  ⚠️  Agent reported error: {result[:100]}...")
+                        return {
+                            "filename": filename,
+                            "success": True,
+                            "issues": [],
+                            "summary": {"warning": "Agent reported parsing error"},
+                            "error": result[:200]
+                        }
+            
             # Parse JSON result
             if isinstance(result, str):
                 try:
                     # Strip markdown code fences if present
                     cleaned_result = result.strip()
-                    if cleaned_result.startswith('```'):
-                        # Remove opening fence (```json or ```)
-                        lines = cleaned_result.split('\n')
-                        if lines[0].startswith('```'):
-                            lines = lines[1:]
-                        # Remove closing fence
-                        if lines and lines[-1].strip() == '```':
-                            lines = lines[:-1]
-                        cleaned_result = '\n'.join(lines)
+                    
+                    # Handle various markdown fence formats
+                    if '```' in cleaned_result:
+                        # Method 1: JSON on same line as fence (```json {...} ```)
+                        fence_match = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', cleaned_result)
+                        if fence_match:
+                            cleaned_result = fence_match.group(1)
+                        else:
+                            # Method 2: Multi-line fence (```json\n{...}\n```)
+                            lines = cleaned_result.split('\n')
+                            if lines[0].startswith('```'):
+                                lines = lines[1:]
+                            if lines and lines[-1].strip() == '```':
+                                lines = lines[:-1]
+                            cleaned_result = '\n'.join(lines)
                     
                     result = json.loads(cleaned_result)
                     print(f"  ✅ Parsed response successfully")
@@ -224,6 +284,30 @@ class GitHubPRAnalyzer:
             issues = result.get("issues", [])
             print(f"  📊 Found {len(issues)} potential issues")
             
+            # Store analysis in memory for cross-file insights
+            if memory:
+                memory.record_analysis(filename, issues)
+                
+                # Extract components from summary for convention detection
+                summary = result.get("summary", {})
+                components_analyzed = summary.get("components_analyzed", [])
+                if components_analyzed:
+                    # Build component info from issues (simplified)
+                    component_info = []
+                    for comp_name in components_analyzed:
+                        # Check if any issues mention this component
+                        comp_issues = [i for i in issues if i.get("component") == comp_name]
+                        has_memo = any("memo" in i.get("title", "").lower() for i in comp_issues)
+                        component_info.append({
+                            "name": comp_name,
+                            "isMemoized": not has_memo  # Simplified heuristic
+                        })
+                    
+                    # Detect conventions
+                    memory.detect_conventions(component_info)
+                
+                print(f"  💾 Stored in memory: {len(issues)} issues recorded")
+            
             return {
                 "filename": filename,
                 "success": True,
@@ -242,16 +326,27 @@ class GitHubPRAnalyzer:
     
     async def analyze_pr(self, pr_number: int) -> Dict:
         """
-        Analyze all React files in a PR
+        Analyze all React files in a PR with memory-aware context
         
         Args:
             pr_number: Pull request number
             
         Returns:
-            Combined analysis results
+            Combined analysis results with project-wide insights
         """
+        from memory import ProjectMemory
+        
         print(f"\n🚀 Analyzing PR #{pr_number} in {self.repo}")
         print("=" * 60)
+        
+        # Create ONE session ID for entire PR analysis
+        # This allows agents to see conversation history across all files
+        session_id = f"pr-{self.repo.replace('/', '-')}-{pr_number}"
+        print(f"📝 Session ID: {session_id}")
+        
+        # Initialize memory for this PR analysis
+        memory = ProjectMemory()
+        print("🧠 Memory initialized - enabling cross-file pattern detection")
         
         # Get changed files
         changed_files = self.get_changed_files(pr_number)
@@ -268,29 +363,43 @@ class GitHubPRAnalyzer:
         results = []
         for file_info in changed_files:
             filename = file_info['filename']
+            contents_url = file_info.get('contents_url')  # GitHub API URL for contents
             
-            # Fetch file content
+            # Fetch file content (prefer contents_url for reliability)
             try:
-                content = self.fetch_file_content(filename, ref=f"pull/{pr_number}/head")
+                content = self.fetch_file_content(filename, ref=f"pull/{pr_number}/head", contents_url=contents_url)
             except Exception as e:
                 print(f"  ❌ Could not fetch {filename}: {str(e)}")
                 continue
             
-            # Analyze file
-            analysis = await self.analyze_pr_file(filename, content)
+            # Analyze file with memory context and shared session ID
+            analysis = await self.analyze_pr_file(filename, content, session_id=session_id, memory=memory)
             results.append(analysis)
         
         # Combine results
         total_issues = sum(len(r.get("issues", [])) for r in results if r.get("success"))
         
+        # Get project-wide insights from memory
+        project_insights = memory.get_analysis_summary()
+        recurring_warning = memory.get_recurring_issue_warning()
+        
         print("=" * 60)
         print(f"✅ Analysis complete: {len(results)} files, {total_issues} issues found")
+        
+        if recurring_warning:
+            print(f"⚠️  {recurring_warning}")
+        
+        if memory.conventions:
+            print(f"📘 Detected conventions: {', '.join(f'{k}={v}' for k, v in memory.conventions.items())}")
         
         return {
             "pr_number": pr_number,
             "files_analyzed": len(results),
             "results": results,
-            "total_issues": total_issues
+            "total_issues": total_issues,
+            "project_insights": project_insights,
+            "recurring_warning": recurring_warning,
+            "detected_conventions": memory.conventions
         }
     
     def post_review_comment(
@@ -494,6 +603,26 @@ class GitHubPRAnalyzer:
                     "body": comment_body.strip()
                 })
         
+        # Build memory insights section
+        memory_section = ""
+        recurring_warning = analysis.get("recurring_warning")
+        conventions = analysis.get("detected_conventions", {})
+        
+        if recurring_warning or conventions:
+            memory_section = "\n\n---\n\n### 🧠 Project-Wide Insights\n\n"
+            
+            if recurring_warning:
+                memory_section += f"**⚠️ Recurring Pattern Detected:**\n{recurring_warning}\n\n"
+                memory_section += "Consider implementing a project-wide solution:\n"
+                memory_section += "- Add ESLint rules (e.g., `react-perf/jsx-no-new-function-as-prop`)\n"
+                memory_section += "- Create utility hooks (e.g., `useStableCallback`)\n"
+                memory_section += "- Team training on React.memo patterns\n\n"
+            
+            if conventions:
+                memory_section += "**Detected Conventions:**\n"
+                for key, value in conventions.items():
+                    memory_section += f"- {key.replace('_', ' ').title()}: `{value}`\n"
+        
         # Determine review event
         if critical_count > 0:
             event = "REQUEST_CHANGES"
@@ -510,6 +639,7 @@ This PR has {critical_count} critical performance issue(s) that should be addres
 - 💡 Total issues: {len(review_comments)}
 
 Please review the inline comments for details.
+{memory_section}
 """
         elif high_count > 0 and not auto_approve:
             event = "COMMENT"
@@ -523,6 +653,7 @@ Please review the inline comments for details.
 - 💡 Total issues: {len(review_comments)}
 
 Consider addressing these before merging.
+{memory_section}
 """
         elif len(review_comments) > 0:
             event = "APPROVE" if auto_approve else "COMMENT"
@@ -532,6 +663,7 @@ Consider addressing these before merging.
 **Minor issues found: {len(review_comments)}**
 
 These are suggestions that may improve performance. Not blocking.
+{memory_section}
 """
         else:
             event = "APPROVE" if auto_approve else "COMMENT"
@@ -539,6 +671,7 @@ These are suggestions that may improve performance. Not blocking.
 ## ✅ React Performance Review
 
 No performance issues detected! Great work! 🎉
+{memory_section}
 """
         
         # Post review

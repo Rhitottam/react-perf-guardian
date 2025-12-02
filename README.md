@@ -12,6 +12,7 @@ AI-powered multi-agent system for automated React performance analysis in Pull R
 ## 🎯 Features
 
 - **🤖 Multi-Agent Analysis**: Four-stage AI pipeline (Parser → Analyzer → Reasoner → Reporter)
+- **🧠 Smart Memory System**: Tracks patterns across files, detects recurring issues, learns project conventions
 - **📝 Inline PR Comments**: Posts detailed review comments on specific lines
 - **🎯 Smart Detection**: Identifies critical React performance issues
 - **⚙️ Configurable**: Severity thresholds and auto-approval settings
@@ -47,6 +48,12 @@ AI-powered multi-agent system for automated React performance analysis in Pull R
 ## 🏗️ Architecture
 
 ```
+                                  🧠 PROJECT MEMORY
+                                 (Tracks Patterns)
+                                        │
+                    ┌───────────────────┼───────────────────┐
+                    │                   │                   │
+                    ▼                   ▼                   ▼
 ┌─────────────┐     ┌──────────────┐     ┌────────────────┐     ┌────────────────┐
 │   Parser    │────▶│   Analyzer   │────▶│    Reasoner    │────▶│    Reporter    │
 │   Agent     │     │    Agent     │     │     Agent      │     │     Agent      │
@@ -54,11 +61,13 @@ AI-powered multi-agent system for automated React performance analysis in Pull R
      │                     │                      │                      │
   Babel AST           Pattern              Validation             Formatted
    Parsing            Detection            & Filtering              Output
+                     + Memory Read        + Memory Write        + Insights
 ```
 
 **Tech Stack:**
 - 🧠 Google Gemini 2.5 Flash Lite
 - 🔧 Google ADK (Agent Development Kit)
+- 💾 InMemorySessionService + ProjectMemory
 - 📝 Babel Parser (AST analysis)
 - 🐍 Python 3.12+ 
 - 📦 Node.js 20+
